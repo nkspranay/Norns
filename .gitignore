@@ -1,0 +1,35 @@
+# Python bytecode — compiled files Python generates automatically, not source code
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environment — thousands of files, never commit dependencies
+venv/
+.venv/
+env/
+
+# Environment variables — contains passwords and secrets, NEVER commit this
+.env
+
+# Database files
+*.db
+*.sqlite3
+
+# Alembic — generated migration cache
+alembic/versions/__pycache__/
+
+# VS Code settings — personal editor preferences, not project code
+.vscode/
+
+# OS garbage files
+.DS_Store
+Thumbs.db
+
+# Test cache
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Logs
+*.log
+logs/
