@@ -52,7 +52,23 @@ async def execute_job(job_type: str, payload: dict) -> dict:
     else:
         await asyncio.sleep(1)
         return {"job_type": job_type, "status": "completed"}
+    
+# ── Cleanup Dead Workers ────────────────────────────────────────────────────────
 
+async def cleanup_dead_workers() -> None:
+    """Mark workers that haven't heartbeated recently as dead."""
+    from datetime import timedelta
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(Worker))
+        workers = result.scalars().all()
+        now = datetime.now(timezone.utc)
+        for worker in workers:
+            if worker.last_heartbeat is None:
+                worker.status = WorkerStatus.DEAD
+            elif (now - worker.last_heartbeat).seconds > settings.heartbeat_timeout:
+                worker.status = WorkerStatus.DEAD
+        await db.commit()
+        log.info("dead_workers_cleaned_up")
 
 # ── Worker Registration ────────────────────────────────────────────────────────
 
@@ -94,6 +110,16 @@ async def heartbeat_loop(worker_id: str, current_job: dict) -> None:
                 await refresh_lock(redis, job_id, worker_id)
 
             await redis.aclose()
+            async with AsyncSessionLocal() as db:
+                result = await db.execute(
+                    select(Worker).where(Worker.id == worker_id)
+                )
+                worker = result.scalar_one_or_none()
+                if worker:
+                    worker.last_heartbeat = datetime.now(timezone.utc)
+                    worker.current_job_id = job_id
+                    worker.status = WorkerStatus.ACTIVE if job_id else WorkerStatus.IDLE
+                    await db.commit()
             log.info("heartbeat_sent", worker_id=worker_id, job_id=job_id)
 
         except Exception as e:
@@ -180,6 +206,14 @@ async def process_job(worker_id: str, job_message: dict) -> None:
             execution.completed_at = datetime.now(timezone.utc)
             job.status = JobStatus.COMPLETED
 
+            # Update worker stats in PostgreSQL
+            worker_result = await db.execute(
+                select(Worker).where(Worker.id == worker_id)
+            )
+            worker_record = worker_result.scalar_one_or_none()
+            if worker_record:
+                worker_record.jobs_completed += 1
+
             await db.commit()
             log.info("job_completed", job_id=job_id, result=result)
 
@@ -201,6 +235,14 @@ async def process_job(worker_id: str, job_message: dict) -> None:
                     redis, job_id, job_type, payload,
                     error_msg, job.retry_count
                 )
+
+                 # Update worker failure stats
+                worker_result = await db.execute(
+                    select(Worker).where(Worker.id == worker_id)
+                )
+                worker_record = worker_result.scalar_one_or_none()
+                if worker_record:
+                    worker_record.jobs_failed += 1
                 log.error("job_sent_to_dlq", job_id=job_id,
                          attempts=job.retry_count)
             else:
@@ -239,6 +281,7 @@ async def run_worker() -> None:
 
     # Register in PostgreSQL
     await register_worker(worker_id, worker_name)
+    await cleanup_dead_workers()
 
     # Start heartbeat as a background task
     heartbeat_task = asyncio.create_task(
