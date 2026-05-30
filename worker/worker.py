@@ -18,6 +18,7 @@ from app.queue.redis_queue import (
     send_heartbeat,
     send_to_dlq,
 )
+from app.websocket import publish_job_event, publish_worker_event
 
 log = structlog.get_logger()
 
@@ -196,6 +197,12 @@ async def process_job(worker_id: str, job_message: dict) -> None:
         await db.commit()
         await db.refresh(execution)
 
+        # Publish job started event
+        await publish_job_event(
+            redis, "job_started", job_id,
+            job_type, "running", worker_id
+        )
+
         # ── Step 7: Execute the job ───────────────────────────────────────────
         try:
             result = await execute_job(job_type, payload)
@@ -216,6 +223,12 @@ async def process_job(worker_id: str, job_message: dict) -> None:
 
             await db.commit()
             log.info("job_completed", job_id=job_id, result=result)
+
+            # Publish job completed event
+            await publish_job_event(
+                redis, "job_completed", job_id,
+                job_type, "completed", worker_id, result=result
+            )
 
         except Exception as e:
             error_msg = str(e)
@@ -245,6 +258,12 @@ async def process_job(worker_id: str, job_message: dict) -> None:
                     worker_record.jobs_failed += 1
                 log.error("job_sent_to_dlq", job_id=job_id,
                          attempts=job.retry_count)
+                
+                # Publish job dead event
+                await publish_job_event(
+                    redis, "job_dead", job_id,
+                    job_type, "dead", worker_id, error=error_msg
+                )
             else:
                 # Calculate backoff delay
                 backoff = settings.job_retry_backoff ** job.retry_count
