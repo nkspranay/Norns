@@ -6,6 +6,7 @@ from prometheus_client import make_asgi_app, Counter, Gauge, Histogram
 
 from app.config import settings
 from app.database import engine, Base
+from app.middleware import RateLimitMiddleware
 
 # ── Logging ────────────────────────────────────────────────────────────────────
 
@@ -74,6 +75,14 @@ app.add_middleware(
     allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
+)
+
+app.add_middleware(
+    RateLimitMiddleware,
+    bucket_capacity=500,
+    bucket_refill_rate=100,
+    window_limit=100,
+    window_seconds=60,
 )
 
 # ── Mount Prometheus metrics endpoint ──────────────────────────────────────────
