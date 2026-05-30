@@ -3,10 +3,14 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from prometheus_client import make_asgi_app, Counter, Gauge, Histogram
+from fastapi import WebSocket, WebSocketDisconnect
 
 from app.config import settings
 from app.database import engine, Base
 from app.middleware import RateLimitMiddleware
+from app.websocket import manager, redis_subscriber
+
+
 
 # ── Logging ────────────────────────────────────────────────────────────────────
 
@@ -54,6 +58,7 @@ JOB_DURATION = Histogram(
 async def lifespan(app: FastAPI):
     # Startup
     log.info("scheduler_starting", env=settings.app_env)
+    asyncio.create_task(redis_subscriber())
     yield
     # Shutdown
     log.info("scheduler_stopping")
@@ -94,6 +99,18 @@ app.mount("/metrics", metrics_app)
 
 from app.api import jobs as jobs_router  # noqa: E402
 app.include_router(jobs_router.router, prefix="/api/v1", tags=["jobs"])
+
+# ── WebSocket endpoint ─────────────────────────────────────────────────────────  
+
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    await manager.connect(websocket)
+    try:
+        while True:
+            # Keep connection alive — wait for client messages
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        manager.disconnect(websocket)
 
 # ── Health check ───────────────────────────────────────────────────────────────
 
