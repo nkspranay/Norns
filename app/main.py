@@ -53,6 +53,30 @@ JOB_DURATION = Histogram(
     buckets=[0.1, 0.5, 1.0, 5.0, 10.0, 30.0, 60.0, 300.0],
 )
 
+# ── Queue Metrics ───────────────────────────────────────────────────────────────────
+
+
+async def update_queue_metrics() -> None:
+    """
+    Background task — updates queue depth Prometheus gauges every 15 seconds.
+    Runs independently of API requests so Prometheus always has fresh data.
+    """
+    from app.queue.redis_queue import get_redis, get_queue_stats
+    while True:
+        try:
+            redis = await get_redis()
+            stats = await get_queue_stats(redis)
+            await redis.aclose()
+
+            for priority, depth in stats.items():
+                if priority != "total":
+                    QUEUE_DEPTH.labels(priority=priority).set(depth)
+
+        except Exception as e:
+            log.error("queue_metrics_update_failed", error=str(e))
+
+        await asyncio.sleep(15)
+
 # ── Lifespan ───────────────────────────────────────────────────────────────────
 
 @asynccontextmanager
@@ -60,6 +84,7 @@ async def lifespan(app: FastAPI):
     # Startup
     log.info("scheduler_starting", env=settings.app_env)
     asyncio.create_task(redis_subscriber())
+    asyncio.create_task(update_queue_metrics())
     yield
     # Shutdown
     log.info("scheduler_stopping")
