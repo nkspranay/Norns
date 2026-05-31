@@ -14,5 +14,8 @@ scrape_configs:
 
   - job_name: scheduler_worker
     static_configs:
-      - targets: ["host.docker.internal:9100"]
+      - targets:
+        - "host.docker.internal:9100"
+        - "host.docker.internal:9101"
+        - "host.docker.internal:9102"
     metrics_path: /metrics
