@@ -1,6 +1,7 @@
 import asyncio
 import json
 import uuid
+import time
 import structlog
 from datetime import datetime, timezone
 from sqlalchemy import select
@@ -19,6 +20,25 @@ from app.queue.redis_queue import (
     send_to_dlq,
 )
 from app.websocket import publish_job_event, publish_worker_event
+
+from prometheus_client import start_http_server, Counter, Gauge, Histogram
+
+# Worker metrics
+WORKER_JOBS_PROCESSED = Counter(
+    "worker_jobs_processed_total",
+    "Total jobs processed by this worker",
+    ["job_type", "status"]
+)
+WORKER_ACTIVE_JOBS = Gauge(
+    "worker_active_jobs",
+    "Number of jobs currently being processed"
+)
+WORKER_JOB_DURATION = Histogram(
+    "worker_job_duration_seconds",
+    "Job execution duration in seconds",
+    ["job_type"],
+    buckets=[0.1, 0.5, 1.0, 5.0, 10.0, 30.0, 60.0, 300.0],
+)
 
 log = structlog.get_logger()
 
@@ -194,6 +214,7 @@ async def process_job(worker_id: str, job_message: dict) -> None:
 
         # ── Step 6: Mark job as RUNNING ───────────────────────────────────────
         job.status = JobStatus.RUNNING
+        WORKER_ACTIVE_JOBS.inc()
         await db.commit()
         await db.refresh(execution)
 
@@ -202,16 +223,21 @@ async def process_job(worker_id: str, job_message: dict) -> None:
             redis, "job_started", job_id,
             job_type, "running", worker_id
         )
-
+        job_start_time = time.time()
         # ── Step 7: Execute the job ───────────────────────────────────────────
         try:
             result = await execute_job(job_type, payload)
+            job_duration = time.time() - job_start_time
 
             # ── Step 8a: Success ──────────────────────────────────────────────
             execution.status = JobStatus.COMPLETED
             execution.result = result
             execution.completed_at = datetime.now(timezone.utc)
             job.status = JobStatus.COMPLETED
+
+            WORKER_JOB_DURATION.labels(job_type=job_type).observe(job_duration)
+            WORKER_JOBS_PROCESSED.labels(job_type=job_type, status="completed").inc()
+            #WORKER_ACTIVE_JOBS.dec()
 
             # Update worker stats in PostgreSQL
             worker_result = await db.execute(
@@ -248,6 +274,8 @@ async def process_job(worker_id: str, job_message: dict) -> None:
                     redis, job_id, job_type, payload,
                     error_msg, job.retry_count
                 )
+                WORKER_JOBS_PROCESSED.labels(job_type=job_type, status="failed").inc()
+                # WORKER_ACTIVE_JOBS.dec()
 
                  # Update worker failure stats
                 worker_result = await db.execute(
@@ -285,6 +313,7 @@ async def process_job(worker_id: str, job_message: dict) -> None:
         finally:
             # ── Step 9: Always release the lock ───────────────────────────────
             await release_lock(redis, job_id, worker_id)
+            WORKER_ACTIVE_JOBS.dec()
             await redis.aclose()
 
 
@@ -300,6 +329,9 @@ async def run_worker() -> None:
 
     # Register in PostgreSQL
     await register_worker(worker_id, worker_name)
+    # Start metrics server so Prometheus can scrape this worker
+    start_http_server(9100)
+    log.info("metrics_server_started", port=9100)
     await cleanup_dead_workers()
 
     # Start heartbeat as a background task
