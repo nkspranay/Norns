@@ -1,4 +1,5 @@
 import asyncio
+import os
 import json
 import uuid
 import time
@@ -330,8 +331,15 @@ async def run_worker() -> None:
     # Register in PostgreSQL
     await register_worker(worker_id, worker_name)
     # Start metrics server so Prometheus can scrape this worker
-    start_http_server(9100)
-    log.info("metrics_server_started", port=9100)
+    # start_http_server(9100)
+    metrics_port = int(os.environ.get("WORKER_METRICS_PORT", 9100))
+    try:
+        start_http_server(metrics_port)
+        log.info("metrics_server_started", port=metrics_port)
+    except OSError:
+        # Port already in use — skip metrics server for this worker
+        log.warning("metrics_port_in_use", port=metrics_port)
+    # log.info("metrics_server_started", port=9100)
     await cleanup_dead_workers()
 
     # Start heartbeat as a background task
