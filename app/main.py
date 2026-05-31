@@ -1,5 +1,6 @@
 import structlog
 from contextlib import asynccontextmanager
+import asyncio
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from prometheus_client import make_asgi_app, Counter, Gauge, Histogram
