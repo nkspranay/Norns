@@ -300,6 +300,13 @@ async def process_job(worker_id: str, job_message: dict) -> None:
                 log.info("job_retrying", job_id=job_id,
                         attempt=job.retry_count,
                         backoff_seconds=backoff)
+                
+                # Publish retry event  ← add this
+                await publish_job_event(
+                    redis, "job_retrying", job_id,
+                    job_type, "queued", worker_id,
+                    error=error_msg
+                )
 
                 # Wait then requeue
                 await asyncio.sleep(backoff)

@@ -65,6 +65,12 @@ async def create_job(
     await db.commit()
     await db.refresh(job)
 
+    # Publish queued event so WebSocket dashboard shows it immediately
+    await publish_job_event(
+        redis, "job_queued", job.id,
+        job.job_type, "queued"
+    )
+
     # 4. Update Prometheus metrics
     JOBS_SUBMITTED.labels(
         job_type=job.job_type,
