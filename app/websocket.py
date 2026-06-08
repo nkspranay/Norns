@@ -46,6 +46,8 @@ class ConnectionManager:
         # Clean up dead connections
         for connection in dead:
             self.disconnect(connection)
+        print(f"BROADCAST called, connections: {len(self.active_connections)}, msg: {message}")
+
 
 
 # ── Global manager instance ────────────────────────────────────────────────────

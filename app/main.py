@@ -103,7 +103,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["http://localhost:5173","*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -130,12 +130,14 @@ app.include_router(jobs_router.router, prefix="/api/v1", tags=["jobs"])
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
+    print("WS connection request received")
     await manager.connect(websocket)
     try:
         while True:
             # Keep connection alive — wait for client messages
             await websocket.receive_text()
     except WebSocketDisconnect:
+        print("WS connection closed")
         manager.disconnect(websocket)
 
 # ── Health check ───────────────────────────────────────────────────────────────

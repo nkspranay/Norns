@@ -13,6 +13,7 @@ from app.queue.redis_queue import (
     get_redis, enqueue_job, get_queue_stats, get_dlq_jobs
 )
 from app.main import JOBS_SUBMITTED, QUEUE_DEPTH
+from app.websocket import publish_job_event
 
 log = structlog.get_logger()
 router = APIRouter()

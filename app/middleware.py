@@ -9,7 +9,7 @@ from app.config import settings
 
 log = structlog.get_logger()
 
-EXEMPT_PATHS = {"/health", "/metrics", "/", "/docs", "/openapi.json", "/redoc"}
+EXEMPT_PATHS = {"/health", "/metrics", "/", "/docs", "/openapi.json", "/redoc","/api/v1/queue/stats","/ws"}
 
 
 class RateLimitMiddleware(BaseHTTPMiddleware):
