@@ -10,6 +10,7 @@ env/
 
 # Environment variables — contains passwords and secrets, NEVER commit this
 .env
+.env.prod
 
 # Database files
 *.db
@@ -32,4 +33,3 @@ htmlcov/
 
 # Logs
 *.log
-logs/
