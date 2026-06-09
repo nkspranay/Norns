@@ -83,11 +83,13 @@ async def update_queue_metrics() -> None:
 async def lifespan(app: FastAPI):
     # Startup
     log.info("scheduler_starting", env=settings.app_env)
-    asyncio.create_task(redis_subscriber())
-    asyncio.create_task(update_queue_metrics())
+    subscriber_task = asyncio.create_task(redis_subscriber())
+    metrics_task = asyncio.create_task(update_queue_metrics())
     yield
     # Shutdown
     log.info("scheduler_stopping")
+    subscriber_task.cancel()
+    metrics_task.cancel()
     await engine.dispose()
 
 # ── App ────────────────────────────────────────────────────────────────────────
