@@ -11,6 +11,7 @@
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-4169E1?style=flat&logo=postgresql&logoColor=white)](https://postgresql.org)
 [![Redis](https://img.shields.io/badge/Redis-7-DC382D?style=flat&logo=redis&logoColor=white)](https://redis.io)
 [![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?style=flat&logo=docker&logoColor=white)](https://docker.com)
+[![Live](https://img.shields.io/badge/Live-AWS%20EC2-FF9900?style=flat&logo=amazonaws&logoColor=white)](http://15.206.124.39)
 
 </div>
 
@@ -35,60 +36,126 @@ This project implements the same architectural patterns used in large-scale back
 
 ```
 ┌──────────────────────────────────────────────┐
-                         │             Browser / Dashboard              │
-                         │                                              │
-                         │  • WebSocket connection to FastAPI /ws       │
-                         │    (opened on page load, stays persistent)   │
-                         │  • Receives pushed events — never polls      │
-                         │  • If WebSocket fails → system unaffected    │
-                         │  • Browser auto-reconnects every 3 seconds   │
-                         └──────┬────────────────────────────────▲──────┘
-                                │                                │
-                                │ HTTP Traffic                   │ Persistent
-                                │ (POST/GET/DELETE)              │ WS Broadcasts
-                                ▼                                │
-    ┌────────────────────────────────────────────────────────────┴─┐
-    │                       FastAPI Process                        │
-    │                                                              │
-    │  ┌─────────────────┐                  ┌─────────────────┐    │
-    │  │    REST API     │                  │  WebSocket Hub  │    │
-    │  │                 │                  │                 │    │
-    │  │ • rate limiting │                  │ • manages all   │    │
-    │  │ • validation    │                  │   browser       │    │
-    │  │ • job creation  │                  │   connections   │    │
-    │  │ • job queries   │                  │ • broadcasts    │    │
-    │  └────────┬────────┘                  └────────▲────────┘    │
-    │           │                                    │             │
-    └───────────┼────────────────────────────────────┼─────────────┘
-                │                                    │
-        ┌───────┴──────────────┐                     │ Subscribes to
-        │ Reads/Writes         │ Ingestion &         │ norns:jobs &
-        │ Metadata/Queries     │ Rate Limiting       │ norns:workers
-        ▼                      ▼                     │
-    ┌─────────────────┐  ┌───────────────────────────┴──────────┐
-    │   PostgreSQL    │  │                Redis                 │
-    │                 │  │                                      │
-    │ • jobs          │  │ ① job queues (LPUSH / BRPOP)         │
-    │ • executions    │  │ ② distributed locks (SET NX PX / DEL)│
-    │ • workers       │  │ ③ worker heartbeats (SET with TTL)   │
-    │                 │  │ ④ rate limiter (sorted sets)         │
-    │                 │  │ ⑤ pub/sub channels                   │
-    └────────▲────────┘  └──────────────────▲───────────────────┘
-             │                              │
-             │                              │ ◄──► Bidirectional
-             │ Writes State Changes         │      • BRPOP Job Payload
-             │ (status, retry_count,        │      • Acquire/Refresh Locks
-             │  result, attempt,            │      • Worker Heartbeats
-             │  timing, error)              │      • Requeue on Backoff / DLQ
-             │                              │      • Publish State Events
-             │                              │
-             └───────────────┐      ┌───────▼───────────────────┐
-                             │      │        Worker Pool        │
-                             │      │                           │
-                             │      │   Worker A     Worker B   │
-                             │      │   Worker C     Worker N   │
-                             └──────┴───────────────────────────┘
+│             Browser / Dashboard              │
+│                                              │
+│  • React SPA — live at http://15.206.124.39  │
+│  • WebSocket connection to FastAPI /ws        │
+│    (opened on page load, stays persistent)   │
+│  • Receives pushed events — never polls      │
+│  • If WebSocket fails → system unaffected    │
+│  • Browser auto-reconnects every 3 seconds   │
+└──────┬────────────────────────────────▲──────┘
+       │                                │
+       │ HTTP Traffic                   │ Persistent
+       │ (POST/GET/DELETE)              │ WS Broadcasts
+       ▼                                │
+┌──────────────────────────────────────┴──────────────────────────────┐
+│                          Nginx (port 80)                            │
+│                                                                     │
+│  • Serves React static files (frontend/dist)                        │
+│  • Proxies /api/* → FastAPI:8000                                    │
+│  • Proxies /ws   → FastAPI:8000 (WebSocket upgrade)                 │
+└──────────────────────────┬──────────────────────────────────────────┘
+                           │
+                           ▼
+┌──────────────────────────────────────────────────────────────────────┐
+│                         FastAPI Process                              │
+│                                                                      │
+│  ┌─────────────────┐                  ┌─────────────────┐            │
+│  │    REST API     │                  │  WebSocket Hub  │            │
+│  │                 │                  │                 │            │
+│  │ • rate limiting │                  │ • manages all   │            │
+│  │ • validation    │                  │   browser       │            │
+│  │ • job creation  │                  │   connections   │            │
+│  │ • job queries   │                  │ • broadcasts    │            │
+│  └────────┬────────┘                  └────────▲────────┘            │
+│           │                                    │                     │
+│           │           ┌────────────────────────┤                     │
+│           │           │  /metrics endpoint     │ Subscribes to       │
+│           │           │  Prometheus scrapes     │ norns:jobs &        │
+│           │           │  every 15 seconds       │ norns:workers       │
+│           │           └──────────┬─────────────┘                     │
+└───────────┼──────────────────────┼─────────────────────────────────┘
+            │                      │
+    ┌───────┴──────┐    ┌──────────▼──────────────────────────────────┐
+    │  PostgreSQL  │    │                  Redis                      │
+    │              │    │                                             │
+    │ • jobs       │    │ ① job queues (LPUSH / BRPOP)                │
+    │ • executions │    │ ② distributed locks (SET NX PX / DEL)       │
+    │ • workers    │    │ ③ worker heartbeats (SET with TTL)           │
+    │              │    │ ④ rate limiter (sorted sets)                 │
+    └──────▲───────┘    │ ⑤ pub/sub channels                          │
+           │            └──────────────────▲──────────────────────────┘
+           │                               │
+           │ Writes State Changes          │ Bidirectional
+           │ (status, retry_count,         │ • BRPOP Job Payload
+           │  result, attempt,             │ • Acquire/Refresh Locks
+           │  timing, error)               │ • Worker Heartbeats
+           │                               │ • Requeue on Backoff / DLQ
+           │                               │ • Publish State Events
+           └──────────────┐      ┌─────────▼──────────────────────────┐
+                          │      │           Worker Pool              │
+                          │      │                                    │
+                          │      │   Worker A     Worker B            │
+                          │      │   Worker C     Worker N            │
+                          └──────┴────────────────────────────────────┘
+                                          │
+                          ┌───────────────▼───────────────────────────┐
+                          │           Observability Stack             │
+                          │                                           │
+                          │  ┌─────────────────┐  ┌───────────────┐  │
+                          │  │   Prometheus     │  │    Grafana    │  │
+                          │  │                 │  │               │  │
+                          │  │ • scrapes /metrics│  │ • Norns       │  │
+                          │  │   from API +    │  │   Command     │  │
+                          │  │   workers every │  │   Center      │  │
+                          │  │   15 seconds    │  │   dashboard   │  │
+                          │  │ • stores time   │  │ • live queue  │  │
+                          │  │   series data   │  │   depth       │  │
+                          │  │ • job counters  │  │ • throughput  │  │
+                          │  │ • queue depth   │  │ • worker util │  │
+                          │  │ • duration histo│  │ • exec timing │  │
+                          │  └─────────────────┘  └───────────────┘  │
+                          │                                           │
+                          │  Note: Excluded from AWS deployment due   │
+                          │  to t3.micro RAM constraints. Runs        │
+                          │  locally via docker-compose.yml.          │
+                          │  Production: CloudWatch + managed Grafana │
+                          └───────────────────────────────────────────┘
 ```
+
+---
+
+## Deployment
+
+**Live instance:** http://15.206.124.39
+
+Deployed on AWS EC2 (t3.micro, ap-south-1 Mumbai) using Docker Compose. All services run as containers on a single instance behind Nginx.
+
+```
+Internet → EC2 t3.micro (ap-south-1)
+              ├── Nginx (port 80)        → serves React static files
+              │                          → proxies /api to FastAPI
+              │                          → proxies /ws (WebSocket upgrade)
+              ├── FastAPI (port 8000, internal)
+              ├── Worker (Python process)
+              ├── PostgreSQL (Docker, internal only — not exposed)
+              └── Redis (Docker, internal only — not exposed)
+```
+
+Prometheus and Grafana are excluded from the production deployment — Grafana alone consumes ~300MB RAM which exceeds t3.micro's headroom. They run locally via `docker-compose.yml` for development observability.
+
+**Production architecture** (what this would look like at scale):
+
+| Current (EC2) | Production |
+|---|---|
+| Single EC2 t3.micro | ECS Fargate (auto-scaling) |
+| PostgreSQL container | RDS PostgreSQL (Multi-AZ, automated backups) |
+| Redis container | ElastiCache Redis (cluster mode) |
+| Nginx on EC2 | Application Load Balancer |
+| `.env.prod` file | AWS Secrets Manager |
+| Manual deploy | GitHub Actions CI/CD → ECS |
+| No observability in prod | CloudWatch metrics + managed Grafana |
 
 ---
 
@@ -115,6 +182,10 @@ Workers claim jobs using Redis `SET key value NX PX ttl` — atomic set-if-not-e
 ### Rate limiting strategy
 
 Job submission (`POST /jobs`) uses **token bucket** — allows bursts up to 500 tokens because schedulers have inherently bursty workloads (payroll runs, batch processing). Read endpoints use **sliding window** — strict 100 requests/minute per IP with no burst allowance. Both are implemented in Redis with standard `X-RateLimit-*` headers on every response.
+
+### Observability architecture
+
+Prometheus scrapes `/metrics` from both the API and each worker process every 15 seconds. Workers expose metrics on separate ports (9100, 9101, 9102...) so Prometheus can distinguish per-worker throughput. Grafana's **Norns Command Center** dashboard provides live queue depth, job throughput, worker utilization, and execution duration histograms. All logs are structured JSON via `structlog` — every line includes `job_id`, `worker_id`, `attempt`, and timing metadata for full traceability.
 
 ---
 
@@ -153,6 +224,9 @@ Job status updated to RUNNING
 Job executes
         │
         ├─── Success → status: COMPLETED, result stored
+        │             Prometheus counter incremented
+        │             Event published to Redis pub/sub
+        │             WebSocket hub broadcasts to dashboard
         │
         └─── Failure → retry_count++
                 │
@@ -191,6 +265,9 @@ Release lock + publish event to Redis pub/sub
     │
     ▼
 WebSocket hub broadcasts to connected dashboards
+    │
+    ▼
+Prometheus metrics updated (counter, histogram)
 ```
 
 ---
@@ -222,6 +299,7 @@ API returns 503. Workers pause and retry connection. No data loss — Redis queu
 - **Queue persistence depends on Redis durability config** — by default Redis is in-memory. Enabling AOF (append-only file) persistence prevents job loss on Redis restart. Not configured in Phase 1.
 - **Single scheduler process** — the API dispatches jobs but there is no dedicated scheduler service yet. High availability for the scheduler (leader election, failover) is a Phase 2 concern.
 - **Simulated job execution** — `execute_job()` simulates work with `asyncio.sleep()`. Real job handlers (SMTP, S3, external APIs) are Phase 2. The infrastructure is complete and handler registration requires only adding cases to the executor function.
+- **Prometheus/Grafana excluded from production** — t3.micro RAM constraints prevent running the full observability stack in the cloud deployment. Production would use CloudWatch metrics + managed Grafana on AWS.
 
 ---
 
@@ -240,9 +318,26 @@ Every service exposes a `/metrics` endpoint scraped by Prometheus every 15 secon
 | `worker_active_jobs` | Gauge | Currently executing jobs per worker |
 | `worker_job_duration_seconds` | Histogram | Worker-side execution timing |
 
-Grafana dashboard: **Norns Command Center** — live queue depth, job throughput, worker utilization, and average execution duration.
+Grafana dashboard: **Norns Command Center** — live queue depth, job throughput, worker utilization, and average execution duration. Available locally at `http://localhost:3000` (admin / admin123).
 
 Structured JSON logging via `structlog` — every log line includes `job_id`, `worker_id`, `attempt`, and timing metadata for full traceability.
+
+---
+
+## React Dashboard
+
+Live at **http://15.206.124.39**
+
+Built with React + Vite + Tailwind CSS. All updates are pushed via WebSocket — the dashboard never polls the API for job state.
+
+**Components:**
+- **Stat Cards** — total/running/completed/failed counters, updated on every WebSocket event
+- **Live Job Events** — real-time feed showing QUEUED → RUNNING → COMPLETED transitions with worker IDs and timestamps
+- **Queue Depth** — bar chart of high/medium/low/DLQ depths, polled every 5 seconds
+- **Worker Panel** — active workers and their current job assignments
+- **Job Submit Form** — submit jobs directly from the dashboard with JSON payload validation
+
+**WebSocket architecture:** A single Redis pub/sub subscriber runs as a background task in FastAPI. When any worker publishes a job event to `norns:jobs`, the subscriber receives it and broadcasts to all connected browsers via the `ConnectionManager`. This means N browsers receive updates from M workers through a single Redis connection — the fan-out is handled at the application layer.
 
 ---
 
@@ -264,7 +359,7 @@ Structured JSON logging via `structlog` — every log line includes `job_id`, `w
 
 **Submit a job:**
 ```bash
-curl -X POST http://localhost:8000/api/v1/jobs \
+curl -X POST http://15.206.124.39/api/v1/jobs \
   -H "Content-Type: application/json" \
   -d '{
     "name": "Send welcome email",
@@ -296,10 +391,14 @@ pip install -r requirements.txt
 alembic upgrade head
 
 # Start the API server
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+uvicorn app.main:app --host 0.0.0.0 --port 8000
 
 # Start a worker (in a new terminal)
 python3 -m worker.worker
+
+# Start the React dashboard (in a new terminal)
+cd frontend && npm install && npm run dev
+# Open http://localhost:5173
 
 # Start multiple workers (optional)
 WORKER_METRICS_PORT=9100 python3 -m worker.worker &
@@ -308,6 +407,7 @@ WORKER_METRICS_PORT=9102 python3 -m worker.worker &
 ```
 
 **Access:**
+- React dashboard: `http://localhost:5173`
 - API docs: `http://localhost:8000/docs`
 - Grafana: `http://localhost:3000` (admin / admin123)
 - Prometheus: `http://localhost:9090`
@@ -349,11 +449,13 @@ locust -f tests/load/locustfile.py
 | Migrations | Alembic | Versioned schema changes |
 | Queue + coordination | Redis 7 | Sub-ms latency, atomic operations, pub/sub |
 | Real-time | WebSockets (FastAPI native) | Live dashboard without polling |
+| Frontend | React + Vite + Tailwind CSS | Fast builds, component-driven UI |
 | Metrics | Prometheus + Grafana | Industry-standard observability stack |
 | Logging | structlog | Structured JSON — searchable and parseable |
 | Testing | pytest + pytest-asyncio + httpx | Full async test support |
 | Load testing | Locust | Python-native, realistic traffic simulation |
 | Infrastructure | Docker Compose | One-command local environment |
+| Cloud | AWS EC2 + Nginx | Live deployment, publicly accessible |
 
 ---
 
@@ -364,10 +466,14 @@ locust -f tests/load/locustfile.py
 - **Distributed tracing** — OpenTelemetry + Jaeger
 - **Horizontal worker scaling** — Docker Compose scale + Prometheus auto-discovery
 - **Microservices split** — scheduler, worker, notification as separate services
-- **React dashboard** — real-time job monitoring UI
+- **ECS Fargate** — replace EC2 with auto-scaling container orchestration
+- **RDS + ElastiCache** — managed PostgreSQL and Redis on AWS
+- **GitHub Actions CI/CD** — automated deploy on push to main
 
 ---
 
 <div align="center">
-Built with Python · FastAPI · PostgreSQL · Redis · Docker
+Built with Python · FastAPI · PostgreSQL · Redis · Docker · AWS
+
+**Live:** http://15.206.124.39 · **Docs:** http://15.206.124.39/api/v1/docs
 </div>
