@@ -68,60 +68,67 @@ This project implements the same architectural patterns used in large-scale back
 │  │ • validation    │                  │   browser       │            │
 │  │ • job creation  │                  │   connections   │            │
 │  │ • job queries   │                  │ • broadcasts    │            │
-│  └────────┬────────┘                  └────────▲────────┘            │
-│           │                                    │                     │
-│           │           ┌────────────────────────┤                     │
-│           │           │  /metrics endpoint     │ Subscribes to       │
-│           │           │  Prometheus scrapes     │ norns:jobs &        │
-│           │           │  every 15 seconds       │ norns:workers       │
-│           │           └──────────┬─────────────┘                     │
-└───────────┼──────────────────────┼─────────────────────────────────┘
-            │                      │
-    ┌───────┴──────┐    ┌──────────▼──────────────────────────────────┐
-    │  PostgreSQL  │    │                  Redis                      │
-    │              │    │                                             │
-    │ • jobs       │    │ ① job queues (LPUSH / BRPOP)                │
-    │ • executions │    │ ② distributed locks (SET NX PX / DEL)       │
-    │ • workers    │    │ ③ worker heartbeats (SET with TTL)           │
-    │              │    │ ④ rate limiter (sorted sets)                 │
-    └──────▲───────┘    │ ⑤ pub/sub channels                          │
-           │            └──────────────────▲──────────────────────────┘
-           │                               │
-           │ Writes State Changes          │ Bidirectional
-           │ (status, retry_count,         │ • BRPOP Job Payload
-           │  result, attempt,             │ • Acquire/Refresh Locks
-           │  timing, error)               │ • Worker Heartbeats
-           │                               │ • Requeue on Backoff / DLQ
-           │                               │ • Publish State Events
-           └──────────────┐      ┌─────────▼──────────────────────────┐
-                          │      │           Worker Pool              │
-                          │      │                                    │
-                          │      │   Worker A     Worker B            │
-                          │      │   Worker C     Worker N            │
-                          └──────┴────────────────────────────────────┘
-                                          │
-                          ┌───────────────▼───────────────────────────┐
-                          │           Observability Stack             │
-                          │                                           │
-                          │  ┌─────────────────┐  ┌───────────────┐  │
-                          │  │   Prometheus     │  │    Grafana    │  │
-                          │  │                 │  │               │  │
-                          │  │ • scrapes /metrics│  │ • Norns       │  │
-                          │  │   from API +    │  │   Command     │  │
-                          │  │   workers every │  │   Center      │  │
-                          │  │   15 seconds    │  │   dashboard   │  │
-                          │  │ • stores time   │  │ • live queue  │  │
-                          │  │   series data   │  │   depth       │  │
-                          │  │ • job counters  │  │ • throughput  │  │
-                          │  │ • queue depth   │  │ • worker util │  │
-                          │  │ • duration histo│  │ • exec timing │  │
-                          │  └─────────────────┘  └───────────────┘  │
-                          │                                           │
-                          │  Note: Excluded from AWS deployment due   │
-                          │  to t3.micro RAM constraints. Runs        │
-                          │  locally via docker-compose.yml.          │
-                          │  Production: CloudWatch + managed Grafana │
-                          └───────────────────────────────────────────┘
+│  └──┬──────────┬───┘                  └────────▲────────┘            │
+│     │          │                               │                     │
+│     │          │      ┌────────────────────────┤                     │
+│     │          │      │  /metrics endpoint     │ Subscribes to       │
+│     │          │      │  Prometheus scrapes    │ norns:jobs &        │
+│     │          │      │  every 15 seconds      │ norns:workers       │
+│     │          │      └──────────┬─────────────┘                     │
+└─────┼──────────┼─────────────────┼──────────────────────────────────┘
+      │          │                 │
+      │ ① writes │ ② LPUSH job     │
+      │ job      │ to priority     │
+      │ metadata │ queue           │
+      │ ③ reads  │ ④ publishes     │
+      │ /queries │ job_queued      │
+      │          │ event to pub/sub│
+      ▼          ▼                 ▼
+┌───────────┐  ┌─────────────────────────────────────────────────────┐
+│ PostgreSQL│  │                       Redis                         │
+│           │  │                                                     │
+│ • jobs    │  │ ① job queues (LPUSH / BRPOP)  ← API enqueues here  │
+│ • execut. │  │ ② distributed locks (SET NX PX / DEL)              │
+│ • workers │  │ ③ worker heartbeats (SET with TTL)                  │
+│           │  │ ④ rate limiter (sorted sets)  ← API checks here    │
+└─────▲─────┘  │ ⑤ pub/sub channels            ← API publishes here │
+      │        └──────────────────▲────────────────────────────────--┘
+      │                           │
+      │ Writes State Changes      │ Bidirectional
+      │ (status, retry_count,     │ • BRPOP Job Payload
+      │  result, attempt,         │ • Acquire/Refresh Locks
+      │  timing, error)           │ • Worker Heartbeats
+      │                           │ • Requeue on Backoff / DLQ
+      │                           │ • Publish State Events
+      └──────────────┐   ┌────────▼───────────────────────────────────┐
+                     │   │              Worker Pool                   │
+                     │   │                                            │
+                     │   │   Worker A     Worker B                   │
+                     │   │   Worker C     Worker N                   │
+                     └───┴────────────────────────────────────────────┘
+                                       │
+                         ┌─────────────▼─────────────────────────────┐
+                         │          Observability Stack              │
+                         │                                           │
+                         │  ┌─────────────────┐  ┌───────────────┐  │
+                         │  │   Prometheus    │  │    Grafana    │  │
+                         │  │                 │  │               │  │
+                         │  │ • scrapes       │  │ • Norns       │  │
+                         │  │   /metrics from │  │   Command     │  │
+                         │  │   API + workers │  │   Center      │  │
+                         │  │   every 15s     │  │   dashboard   │  │
+                         │  │ • stores time   │  │ • live queue  │  │
+                         │  │   series data   │  │   depth       │  │
+                         │  │ • job counters  │  │ • throughput  │  │
+                         │  │ • queue depth   │  │ • worker util │  │
+                         │  │ • duration histo│  │ • exec timing │  │
+                         │  └─────────────────┘  └───────────────┘  │
+                         │                                           │
+                         │  Note: Excluded from AWS deployment due   │
+                         │  to t3.micro RAM constraints. Runs        │
+                         │  locally via docker-compose.yml.          │
+                         │  Production: CloudWatch + managed Grafana │
+                         └───────────────────────────────────────────┘
 ```
 
 ---
